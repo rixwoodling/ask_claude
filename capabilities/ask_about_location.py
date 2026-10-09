@@ -48,6 +48,8 @@ ANSWER_RULES = """
   location answers.
 - Use plain text unless formatting materially improves readability or the user
   requests it.
+- Never repeat information or explain a limitation more than once in the same answer.
+- For simple "where is X?" questions, give only the location and one essential geographic detail.
 """
 
 REQUEST_SCHEMA = {
