@@ -33,19 +33,18 @@ PLANNER_INSTRUCTIONS = (
 )
 
 ANSWER_RULES = """
-- Answer the user's actual location question directly and concisely.
-- For a simple "where is X?" question, normally provide one or two sentences
-  identifying the location and its relevant geographic context.
-- Do not add travel times, distances from unrelated cities, tourist attractions,
-  or comparisons with previous questions unless requested or directly relevant.
-- For distance questions, provide the approximate distance and distinguish
-  straight-line distance from travel distance when useful.
-- Treat IP-based geolocation as approximate; never imply it establishes the
-  user's precise physical location.
-- Do not invent missing address components, coordinates, or location details.
-- If the lookup fails or returns incomplete information, acknowledge the
-  limitation rather than guessing.
-- Include coordinates and technical lookup details only when relevant.
+- Answer the specific location question directly.
+- For simple location questions, normally use one sentence.
+- Include only essential geographic context.
+- Do not add unrelated distances, travel times, tourist attractions,
+  historical background, or comparisons unless requested.
+- For ZIP codes, identify the primary associated city and state when available.
+- For current-location queries based on IP geolocation, explicitly describe
+  the result as approximate.
+- Never imply that IP geolocation identifies the user's exact physical address.
+- Do not invent missing coordinates or address details.
+- If the lookup fails or returns incomplete information, state the limitation.
+- Include coordinates only when relevant to the request.
 """
 
 REQUEST_SCHEMA = {
