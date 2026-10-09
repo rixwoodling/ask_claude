@@ -44,16 +44,11 @@ ANSWER_RULES = """
 
 PLANNER_INSTRUCTIONS = (
     "Use this capability for historical questions about events, people, places, "
-    "civilizations, wars, and periods, including broad overview requests such as "
-    "the history of the world. Do not skip this capability merely because a "
-    "historical question is broad. Use mode='search' for broad or explanatory "
-    "questions, mode='article' for a clearly named article, and mode='on_this_day' "
-    "for events on a particular date. Preserve the year when supplied. Pass dates "
+    "civilizations, wars, and periods. Use mode='search' for broad/explanatory "
+    "questions, mode='article' for a named article, and mode='on_this_day' for "
+    "events on a particular date. Preserve the year when supplied. Pass dates "
     "as YYYY-MM-DD or MM-DD. For date questions, default to category='events' "
-    "and limit=3. For questions asking what life was like in a civilization or "
-    "period, search for daily life, society, family, work, food, and housing rather "
-    "than relying only on a broad empire overview. Do not invent facts. The final "
-    "answer should follow ANSWER_RULES."
+    "and limit=3. Do not invent facts. The final answer should follow ANSWER_RULES."
 )
 
 USER_AGENT = "ask_claude_history/1.2"
@@ -111,143 +106,115 @@ def _extracts(titles: list[str], language: str) -> dict[str, dict[str, str]]:
     return output
 
 
-def _life_search_variants(query: str) -> list[str]:
-    """Build targeted Wikipedia queries for questions about everyday life."""
-    text = _clean(query).rstrip("?.! ")
-    match = re.search(
-        r"^(?:what (?:was|were) )?(?P<subject>.+?)\s+life(?: like)?$",
-        text, re.I,
-    )
-    if not match:
-        return []
-
-    subject = _clean(match.group("subject"))
-    normalized = subject.lower()
-    known_periods = {
-        "roman": "ancient Rome",
-        "ancient roman": "ancient Rome",
-        "greek": "ancient Greece",
-        "ancient greek": "ancient Greece",
-        "egyptian": "ancient Egypt",
-        "ancient egyptian": "ancient Egypt",
-        "viking": "the Viking Age",
-        "medieval european": "medieval Europe",
-        "medieval europe": "medieval Europe",
+def _search_terms(query: str) -> list[str]:
+    """Extract useful content words without assuming a particular topic."""
+    stopwords = {
+        "a", "an", "and", "are", "about", "by", "did", "do", "does",
+        "for", "from", "happened", "how", "in", "is", "it", "like", "of",
+        "on", "or", "the", "to", "was", "were", "what", "when", "where",
+        "which", "who", "why", "with", "tell", "me", "give", "history",
     }
-    place_or_period = known_periods.get(normalized, subject)
-    return [
-        f"daily life in {place_or_period}",
-        f"society and culture in {place_or_period}",
-    ]
+    words = re.findall(r"[\w'-]+", query.lower())
+    return [word for word in words if word not in stopwords and len(word) > 1]
+
+
+def _search_variants(query: str) -> list[str]:
+    """Build a small set of query variants mechanically from the user's query."""
+    variants = [query.strip()]
+    terms = _search_terms(query)
+    reduced = " ".join(terms)
+    if reduced and reduced.casefold() != query.strip().casefold():
+        variants.append(reduced)
+    # A quoted core phrase can help when the query contains several content words.
+    if len(terms) >= 2:
+        phrase = '"' + " ".join(terms[:5]) + '"'
+        if phrase not in variants:
+            variants.append(phrase)
+    return list(dict.fromkeys(v for v in variants if v))[:3]
+
+
+def _relevance_score(query_terms: list[str], item: dict[str, str]) -> float:
+    """Rank candidates with local lexical evidence; no model call is made."""
+    title = set(re.findall(r"[\w'-]+", item.get("title", "").lower()))
+    snippet = set(re.findall(r"[\w'-]+", item.get("snippet", "").lower()))
+    summary = set(re.findall(r"[\w'-]+", item.get("summary", "").lower()))
+    if not query_terms:
+        return 0.0
+    title_hits = sum(term in title for term in query_terms)
+    snippet_hits = sum(term in snippet for term in query_terms)
+    summary_hits = sum(term in summary for term in query_terms)
+    # Title matches carry more weight; summary matches help distinguish relevant
+    # articles from pages that only mention the subject in passing.
+    return (title_hits * 4.0) + (snippet_hits * 1.5) + (summary_hits * 1.0)
 
 
 def _search(query: str, limit: int, language: str) -> dict[str, Any]:
-    variants = _life_search_variants(query)
-    queries = variants + [query] if variants else [query]
-    results = []
-    seen_titles = set()
-    source_queries = []
+    # Search several mechanically derived variants, gather a candidate pool,
+    # then rank locally. This works across topics without topic-specific rules.
+    variants = _search_variants(query)
+    candidates: dict[str, dict[str, str]] = {}
+    errors = []
+    per_query_limit = max(5, min(10, limit * 3))
 
-    for search_query in queries:
-        data = _get_json(f"https://{language}.wikipedia.org/w/api.php", {
-            "action": "query", "list": "search", "srsearch": search_query,
-            "srnamespace": 0, "srlimit": max(limit, 3), "srprop": "snippet",
-            "format": "json", "formatversion": 2,
-        })
-        pages = data.get("query", {}).get("search", [])
-        titles = [_clean(p.get("title")) for p in pages if p.get("title")]
+    for variant in variants:
         try:
-            details = _extracts(titles, language)
-        except (requests.RequestException, ValueError):
-            details = {}
-
-        added_from_query = False
-        for page in pages:
-            title = _clean(page.get("title"))
-            key = title.casefold()
-            if not title or key in seen_titles:
-                continue
-            seen_titles.add(key)
-            snippet = re.sub(r"<[^>]*>", " ", str(page.get("snippet") or ""))
-            detail = details.get(title, {})
-            results.append({
-                "title": title, "snippet": _clean(snippet),
-                "summary": detail.get("summary", ""),
-                "url": detail.get("url") or (
-                    f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
-                ),
-                "matched_query": search_query,
+            data = _get_json(f"https://{language}.wikipedia.org/w/api.php", {
+                "action": "query", "list": "search", "srsearch": variant,
+                "srnamespace": 0, "srlimit": per_query_limit,
+                "srprop": "snippet", "format": "json", "formatversion": 2,
             })
-            added_from_query = True
-            if len(results) >= limit:
-                break
-        if added_from_query:
-            source_queries.append(search_query)
-        if len(results) >= limit:
-            break
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(str(exc))
+            continue
 
+        for rank, page in enumerate(data.get("query", {}).get("search", [])):
+            title = _clean(page.get("title"))
+            if not title:
+                continue
+            snippet = re.sub(r"<[^>]*>", " ", str(page.get("snippet") or ""))
+            candidate = candidates.setdefault(title, {
+                "title": title, "snippet": _clean(snippet), "summary": "", "url": "",
+                "_search_score": 0.0,
+            })
+            # Retain Wikipedia's own ranking signal across all query variants.
+            # Reciprocal-rank weighting favors results near the top of each list.
+            candidate["_search_score"] += 1.0 / (rank + 1)
+            # Keep the most informative snippet if a title appears more than once.
+            if len(_clean(snippet)) > len(candidate["snippet"]):
+                candidate["snippet"] = _clean(snippet)
+
+    if not candidates and errors:
+        raise requests.RequestException("; ".join(errors[:2]))
+
+    titles = list(candidates)
+    try:
+        details = _extracts(titles, language)
+    except (requests.RequestException, ValueError):
+        details = {}
+
+    for title, candidate in candidates.items():
+        detail = details.get(title, {})
+        candidate["summary"] = detail.get("summary", "")
+        candidate["url"] = detail.get("url") or (
+            f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
+        )
+
+    query_terms = _search_terms(query)
+    ranked = sorted(
+        candidates.values(),
+        key=lambda item: (
+            _relevance_score(query_terms, item) + item.get("_search_score", 0.0),
+            bool(item.get("summary")),
+        ),
+        reverse=True,
+    )
+    results = ranked[:limit]
+    for item in results:
+        item.pop("_search_score", None)
     return {
         "source": f"Wikipedia ({language})", "mode": "search", "query": query,
-        "search_queries": source_queries or queries,
-        "result_count": len(results), "results": results[:limit],
-    }
-
-
-def _full_extract(title: str, language: str) -> dict[str, str] | None:
-    """Retrieve a full article extract for exact-date fallback parsing."""
-    data = _get_json(f"https://{language}.wikipedia.org/w/api.php", {
-        "action": "query", "prop": "extracts|info", "explaintext": 1,
-        "inprop": "url", "redirects": 1, "titles": title,
-        "format": "json", "formatversion": 2,
-    })
-    pages = data.get("query", {}).get("pages", [])
-    if not pages or pages[0].get("missing") is not None:
-        return None
-    page = pages[0]
-    page_title = _clean(page.get("title"))
-    return {
-        "title": page_title,
-        "text": str(page.get("extract") or ""),
-        "url": page.get("fullurl") or (
-            f"https://{language}.wikipedia.org/wiki/{quote(page_title.replace(' ', '_'))}"
-        ),
-    }
-
-
-def _exact_date_fallback(year: int, month: int, day: int, limit: int,
-                         language: str) -> dict[str, Any] | None:
-    """Read the month-year article and extract only the requested date's section."""
-    month_name = date(year, month, day).strftime("%B")
-    article = _full_extract(f"{month_name} {year}", language)
-    if not article or not article.get("text"):
-        return None
-
-    heading = re.compile(
-        rf"(?m)^{re.escape(month_name)} {day}, {year}(?:\s+\([^\n)]*\))?\s*$"
-    )
-    match = heading.search(article["text"])
-    if not match:
-        return None
-
-    next_heading = re.search(
-        r"(?m)^(?:January|February|March|April|May|June|July|August|September|October|November|December) "
-        r"\d{1,2}, \d{4}(?:\s+\([^\n)]*\))?\s*$",
-        article["text"][match.end():],
-    )
-    end = match.end() + next_heading.start() if next_heading else len(article["text"])
-    section = _clean(article["text"][match.end():end])
-    if not section:
-        return None
-
-    return {
-        "source": f"Wikipedia article: {article['title']}",
-        "mode": "on_this_day", "date": f"{year:04d}-{month:02d}-{day:02d}",
-        "category": "events", "result_count": 1,
-        "results": [{
-            "category": "events", "year": year, "text": section,
-            "url": article["url"], "pages": [{"title": article["title"], "url": article["url"]}],
-        }],
-        "fallback_method": "Exact-date section extracted from the month-year article",
+        "query_variants": variants, "candidate_count": len(candidates),
+        "result_count": len(results), "results": results,
     }
 
 
@@ -340,23 +307,12 @@ def _on_this_day(value: Any, category: str, limit: int, language: str) -> dict[s
         return {"source": f"Wikipedia ({language})", "error": f"On This Day request failed: {exc}"}
 
     if year is not None and not results:
-        try:
-            exact_date_result = _exact_date_fallback(year, month, day, limit, language)
-        except (requests.RequestException, ValueError):
-            exact_date_result = None
-        if exact_date_result:
-            return exact_date_result
-
         month_name = date(year, month, day).strftime("%B")
-        fallback = _search(f"{month_name} {day}, {year}", min(limit, 3), language)
+        fallback = _search(f"{month_name} {day}, {year} historical events", min(limit, 3), language)
         fallback.update({
             "requested_mode": "on_this_day",
             "date": f"{year:04d}-{month:02d}-{day:02d}",
-            "fallback_reason": (
-                "No exact-date section was available in the month-year article; "
-                "searched Wikipedia for the requested date. Results must be checked "
-                "against the requested year before being presented as date-specific events."
-            ),
+            "fallback_reason": "No exact-year entry in the curated On This Day feed; searched Wikipedia instead.",
         })
         return fallback
 
