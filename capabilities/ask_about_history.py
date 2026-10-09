@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""History capability using Wikipedia/Wikimedia public APIs; no API key required."""
+"""Historical research capability using Wikipedia/Wikimedia public APIs."""
 
 from __future__ import annotations
 
@@ -15,28 +15,49 @@ import requests
 CAPABILITY = "history"
 DESCRIPTION = (
     "Researches historical events, people, places, civilizations, and periods "
-    "using Wikipedia. Can retrieve article summaries or events associated "
-    "with a specific month/day. No API key is required."
+    "using Wikipedia. Retrieves article summaries or events associated with a date."
 )
+
 REQUEST_SCHEMA = {
     "query": "Historical topic, event, person, place, period, or article title",
     "mode": "search, article, or on_this_day",
-    "date": "YYYY-MM-DD or MM-DD for on_this_day; defaults to today's month/day",
+    "date": "YYYY-MM-DD or MM-DD for on_this_day",
     "category": "events, births, deaths, or all",
     "limit": "Optional integer from 1 to 10; defaults to 3",
     "language": "Optional Wikipedia language code, default en",
 }
+
+# These rules are consumed by ask_claude.py when composing an answer from this
+# capability's results. Keep them domain-specific; global style belongs in
+# rules/general.py.
+ANSWER_RULES = """
+- Use only the supplied history results as factual sources.
+- Answer the user's exact historical question; do not give a general history lesson unless requested.
+- Be concise: normally one to three short sentences or at most three brief bullets.
+- For an on-this-day question without a requested year, list no more than three notable events.
+- For a specific date and year, discuss only events supported for that exact date and year.
+- If the retrieved results do not establish what happened on the requested date, say that the available sources did not establish it. Do not substitute events from other years.
+- Do not repeat the same event in different wording.
+- Avoid long background explanations, inflated introductions, and unnecessary conclusions.
+- Include dates and source URLs only when useful to answer the question.
+"""
+
 PLANNER_INSTRUCTIONS = (
-    "Use this capability for historical questions. Use search for explanatory "
-    "questions and broad topics; article for a named article; on_this_day for "
-    "events on a date. Preserve the year when supplied. Pass dates as YYYY-MM-DD "
-    "or MM-DD. Use at most three results unless the user requests more. "
-    "For date questions, use mode='on_this_day', category='events' by default. "
-    "Do not invent facts; include source URLs in the returned data."
+    "Use this capability for historical questions about events, people, places, "
+    "civilizations, wars, and periods. Use mode='search' for broad/explanatory "
+    "questions, mode='article' for a named article, and mode='on_this_day' for "
+    "events on a particular date. Preserve the year when supplied. Pass dates "
+    "as YYYY-MM-DD or MM-DD. For date questions, default to category='events' "
+    "and limit=3. Do not invent facts. The final answer should follow ANSWER_RULES."
 )
 
-USER_AGENT = "ask_claude_history/1.1"
-API_URL = "https://en.wikipedia.org/w/api.php"
+USER_AGENT = "ask_claude_history/1.2"
+MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
 
 
 def _clean(value: Any) -> str:
@@ -62,31 +83,27 @@ def _get_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     return data
 
 
-def _error(message: str, source: str = "Wikipedia") -> dict[str, Any]:
-    return {"source": source, "error": message}
-
-
 def _extracts(titles: list[str], language: str) -> dict[str, dict[str, str]]:
     if not titles:
         return {}
     data = _get_json(f"https://{language}.wikipedia.org/w/api.php", {
         "action": "query", "prop": "extracts|info", "exintro": 1,
-        "explaintext": 1, "exsentences": 5, "inprop": "url",
+        "explaintext": 1, "exsentences": 4, "inprop": "url",
         "redirects": 1, "titles": "|".join(titles),
         "format": "json", "formatversion": 2,
     })
-    result = {}
+    output = {}
     for page in data.get("query", {}).get("pages", []):
         if page.get("missing") is not None:
             continue
         title = _clean(page.get("title"))
-        result[title] = {
+        output[title] = {
             "summary": _clean(page.get("extract")),
             "url": page.get("fullurl") or (
                 f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
             ),
         }
-    return result
+    return output
 
 
 def _search(query: str, limit: int, language: str) -> dict[str, Any]:
@@ -104,19 +121,18 @@ def _search(query: str, limit: int, language: str) -> dict[str, Any]:
     results = []
     for page in pages:
         title = _clean(page.get("title"))
-        detail = details.get(title, {})
         snippet = re.sub(r"<[^>]*>", " ", str(page.get("snippet") or ""))
+        detail = details.get(title, {})
         results.append({
-            "title": title,
-            "snippet": _clean(snippet),
+            "title": title, "snippet": _clean(snippet),
             "summary": detail.get("summary", ""),
             "url": detail.get("url") or (
                 f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
             ),
         })
     return {
-        "source": f"Wikipedia ({language})", "mode": "search",
-        "query": query, "result_count": len(results), "results": results,
+        "source": f"Wikipedia ({language})", "mode": "search", "query": query,
+        "result_count": len(results), "results": results,
     }
 
 
@@ -141,45 +157,38 @@ def _parse_date(value: Any) -> tuple[int, int, int | None]:
 
 def _infer_date(text: str) -> str | None:
     text = _clean(text)
-    iso = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
-    if iso:
+    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
+    if match:
         try:
-            return date(*map(int, iso.groups())).isoformat()
+            return date(*map(int, match.groups())).isoformat()
         except ValueError:
             return None
-    months = {
-        name: number for number, names in enumerate([], 1) for name in names
-    }
-    months = {
-        "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3,
-        "mar": 3, "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
-        "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9,
-        "sep": 9, "sept": 9, "october": 10, "oct": 10, "november": 11,
-        "nov": 11, "december": 12, "dec": 12,
-    }
-    month_re = "|".join(sorted(months, key=len, reverse=True))
-    patterns = [
-        rf"\b({month_re})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b",
-        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_re})(?:,?\s+(\d{{4}}))?\b",
-    ]
-    for index, pattern in enumerate(patterns):
-        match = re.search(pattern, text, re.I)
+
+    pattern = "|".join(sorted(MONTHS, key=len, reverse=True))
+    match = re.search(
+        rf"\b({pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b",
+        text, re.I,
+    )
+    if match:
+        month, day = MONTHS[match.group(1).lower()], int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else None
+    else:
+        match = re.search(
+            rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({pattern})(?:,?\s+(\d{{4}}))?\b",
+            text, re.I,
+        )
         if not match:
-            continue
-        if index == 0:
-            month, day = months[match.group(1).lower()], int(match.group(2))
-            year = int(match.group(3)) if match.group(3) else None
-        else:
-            day, month = int(match.group(1)), months[match.group(2).lower()]
-            year = int(match.group(3)) if match.group(3) else None
-        try:
-            if year is not None:
-                return date(year, month, day).isoformat()
-            date(2000, month, day)
-            return f"{month:02d}-{day:02d}"
-        except ValueError:
             return None
-    return None
+        day, month = int(match.group(1)), MONTHS[match.group(2).lower()]
+        year = int(match.group(3)) if match.group(3) else None
+
+    try:
+        if year is not None:
+            return date(year, month, day).isoformat()
+        date(2000, month, day)
+        return f"{month:02d}-{day:02d}"
+    except ValueError:
+        return None
 
 
 def _on_this_day(value: Any, category: str, limit: int, language: str) -> dict[str, Any]:
@@ -213,7 +222,7 @@ def _on_this_day(value: Any, category: str, limit: int, language: str) -> dict[s
                     } for p in pages[:2]],
                 })
     except (requests.RequestException, ValueError) as exc:
-        return _error(f"Wikipedia On This Day request failed: {exc}")
+        return {"source": f"Wikipedia ({language})", "error": f"On This Day request failed: {exc}"}
 
     if year is not None and not results:
         month_name = date(year, month, day).strftime("%B")
@@ -221,7 +230,7 @@ def _on_this_day(value: Any, category: str, limit: int, language: str) -> dict[s
         fallback.update({
             "requested_mode": "on_this_day",
             "date": f"{year:04d}-{month:02d}-{day:02d}",
-            "fallback_reason": "No entry for that exact year in the curated On This Day feed; searched Wikipedia instead.",
+            "fallback_reason": "No exact-year entry in the curated On This Day feed; searched Wikipedia instead.",
         })
         return fallback
 
@@ -229,8 +238,7 @@ def _on_this_day(value: Any, category: str, limit: int, language: str) -> dict[s
         "source": f"Wikipedia On This Day ({language})",
         "mode": "on_this_day",
         "date": f"{year:04d}-{month:02d}-{day:02d}" if year else f"{month:02d}-{day:02d}",
-        "category": category,
-        "result_count": min(len(results), limit),
+        "category": category, "result_count": min(len(results), limit),
         "results": results[:limit],
     }
 
@@ -252,9 +260,10 @@ def run_lookup(request: dict[str, Any]) -> dict[str, Any]:
     ):
         if mode == "search":
             mode = "on_this_day"
-        if mode == "on_this_day" and (not request.get("date") or
-                                      (len(str(request.get("date")).split("-")) != 3
-                                       and len(inferred.split("-")) == 3)):
+        if mode == "on_this_day" and (
+            not request.get("date")
+            or (len(str(request.get("date")).split("-")) != 3 and len(inferred.split("-")) == 3)
+        ):
             request = {**request, "date": inferred}
 
     try:
@@ -280,7 +289,7 @@ def run_lookup(request: dict[str, Any]) -> dict[str, Any]:
         return {"error": "Unsupported mode.", "mode": mode,
                 "supported_modes": ["search", "article", "on_this_day"]}
     except (requests.RequestException, ValueError) as exc:
-        return _error(f"Wikipedia request failed: {exc}", f"Wikipedia ({language})")
+        return {"source": f"Wikipedia ({language})", "error": f"Wikipedia request failed: {exc}"}
 
 
 def build_simple_summary(result: dict[str, Any]) -> str:
@@ -298,7 +307,7 @@ def build_simple_summary(result: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Search historical topics via Wikipedia.")
+    parser = argparse.ArgumentParser(description="Search historical topics using Wikipedia.")
     parser.add_argument("query", nargs="?", help="Historical topic or article title")
     parser.add_argument("--mode", choices=("search", "article", "on_this_day"), default="search")
     parser.add_argument("--date", help="YYYY-MM-DD or MM-DD for on_this_day")
