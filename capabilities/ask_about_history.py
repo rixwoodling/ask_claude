@@ -154,13 +154,17 @@ def _search_variants(query: str, life_subject_titles: list[str] | None = None) -
     variants = [original]
 
     if subject:
-        # Always search the requested topic directly, then use canonical topic
-        # titles discovered at runtime. This avoids letting a weak subject
-        # resolution silently replace the user's actual topic.
-        variants = [f'"daily life" "{subject}"']
-        variants.extend(f'"daily life" "{title}"' for title in (life_subject_titles or [])[:2])
-        if not life_subject_titles:
-            variants.append(f'"{subject}" society culture customs')
+        # A quoted phrase can find articles explicitly titled around daily life,
+        # but it misses useful articles about work, society, or survival. Pair it
+        # with a broader lived-experience query regardless of title resolution.
+        variants = [
+            f'"daily life" "{subject}"',
+            f'"{subject}" people society culture customs work family',
+        ]
+        if life_subject_titles:
+            variants.append(f'"daily life" "{life_subject_titles[0]}"')
+        else:
+            variants.append(f'"{subject}" living conditions everyday life')
     else:
         terms = _search_terms(query)
         reduced = " ".join(terms)
