@@ -21,6 +21,7 @@ from memory import add_message, get_recent_messages
 from rules.general import GENERAL_ANSWER_RULES
 from rules.intent import INTENT_RULES
 from rules.composed import COMPOSED_ANSWER_RULES
+import importlib
 from rules.planner import PLANNER_RULES
 
 from core.answer import format_memory, results_as_json
@@ -145,21 +146,62 @@ def plan_lookups(question, recent_messages=None):
     return lookups, usage
 
 
-def answer_question(question, results, recent_messages=None):
-    """Use Claude to turn retrieved facts into the final answer."""
+def capability_answer_rules(lookups):
+    """Collect ANSWER_RULES from the capability modules used for this query.
+
+    Capability-specific rules replace COMPOSED_ANSWER_RULES when present.
+    GENERAL_ANSWER_RULES are always retained as the global baseline.
+    """
+    rules = []
+    seen = set()
+
+    for item in lookups:
+        capability_name = item.get("capability")
+        definition = CAPABILITIES.get(capability_name)
+        if not definition:
+            continue
+
+        # The registry stores each plugin's run_lookup function. Its module
+        # path identifies the actual plugin without changing the registry API.
+        runner = definition.get("run") if isinstance(definition, dict) else None
+        module_name = getattr(runner, "__module__", None)
+        if not module_name:
+            continue
+
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+
+        answer_rules = getattr(module, "ANSWER_RULES", None)
+        if isinstance(answer_rules, str) and answer_rules.strip() and answer_rules not in seen:
+            rules.append(answer_rules.strip())
+            seen.add(answer_rules)
+
+    return "\\n\\n".join(rules)
+
+
+def answer_question(question, results, recent_messages=None, lookups=None):
+    """Compose an answer using global and capability-specific instructions."""
     context = results_as_json(results)
+    specific_rules = capability_answer_rules(lookups or [])
+
+    # Keep composed.py as a fallback while capabilities are migrated.
+    # Capability ANSWER_RULES override composed.py, never general.py.
+    task_rules = specific_rules or COMPOSED_ANSWER_RULES
+    system_rules = GENERAL_ANSWER_RULES + "\\n\\n" + task_rules
 
     prompt = (
-        COMPOSED_ANSWER_RULES
-        + "\n\nRecent conversation:\n"
+        system_rules
+        + "\\n\\nRecent conversation:\\n"
         + format_memory(recent_messages, limit=2)
-        + "\n\nQuestion:\n"
+        + "\\n\\nQuestion:\\n"
         + question
-        + "\n\nRetrieved information:\n"
+        + "\\n\\nRetrieved information:\\n"
         + context
     )
 
-    return call_claude(prompt, system=COMPOSED_ANSWER_RULES, max_tokens=220)
+    return call_claude(prompt, system=system_rules, max_tokens=220)
 
 
 def classify_intent(question, recent_messages=None):
@@ -319,6 +361,7 @@ def main():
             question,
             results,
             recent_messages,
+            lookups,
         )
         add_usage(total, usage)
 
@@ -335,4 +378,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
