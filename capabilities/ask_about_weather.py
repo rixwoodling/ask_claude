@@ -47,10 +47,12 @@ CAPABILITY = "weather"
 
 
 REQUEST_SCHEMA = {
-    "location": "optional location name, postal code, city, or place",
+    "location": "optional location name, postal code, city, or place; use when no location capability is available",
+    "resolved_location": "optional complete result from the location capability, referenced as $location",
     "latitude": "optional latitude; provide with longitude",
     "longitude": "optional longitude; provide with latitude",
-    "forecast_days": "optional integer from 1 to 16",
+    "date": "optional specific forecast date in YYYY-MM-DD format, preferably resolved by the date capability",
+    "forecast_days": "optional integer from 1 to 16 when no specific date is requested",
 }
 
 
@@ -78,52 +80,35 @@ DESCRIPTION = (
 
 
 PLANNER_INSTRUCTIONS = """
-Weather requires either:
-- a location value, or
-- both latitude and longitude.
+Weather requires either a location string, a resolved_location result from the
+location capability, or both latitude and longitude.
 
-If the user explicitly names a location, pass that location directly to
-the weather capability.
+When a location capability is available, use it to resolve explicitly named
+places and ZIP codes before requesting weather. This lets the location
+capability identify ambiguity rather than letting weather guess. For a
+request without a named location, ask the location capability for the
+approximate current location using {"current": true}.
 
-If the user asks about the weather without specifying a location and a
-location capability is available, first call the location capability with:
+Pass the complete location result into weather using:
+{"resolved_location": "$location"}
+The weather capability will use the coordinates if the location result is
+resolved. If it is ambiguous or not found, it will return that status and the
+available candidates instead of making a weather request.
 
-{"current": true}
+If the user asks about a relative date such as "tomorrow" or "two days from
+now" and a date capability is available, call the date capability first and
+pass its resolved YYYY-MM-DD value in weather's date field. Use a reference to
+the actual date field returned by that capability (for example,
+"$date.date" only if its output field is named "date"). Do not make weather
+interpret a relative-date expression when the date capability can resolve it.
 
-Then pass the returned latitude and longitude to weather using capability
-references such as:
+For a specific forecast date, weather returns only that day's forecast. If no
+specific date is requested, use forecast_days appropriate to the question.
+Do not request more than 16 forecast days. Never invent a location or date.
 
-"$location.latitude"
-"$location.longitude"
-
-For example, a current-weather request with an available location
-capability should be planned as:
-
-{
-  "lookups": [
-    {
-      "capability": "location",
-      "request": {"current": true}
-    },
-    {
-      "capability": "weather",
-      "request": {
-        "latitude": "$location.latitude",
-        "longitude": "$location.longitude",
-        "forecast_days": 1
-      }
-    }
-  ]
-}
-
-If the user explicitly provides a location, do not call the location
-capability unnecessarily. Weather can geocode the supplied location itself.
-
-If no location capability is available and the user did not specify a
-location, do not invent, guess, or assume a location. The request cannot
-be completed without a location.
-
-Do not pass an empty weather request for an unspecified location.
+If the location capability is unavailable, an explicitly provided location
+may be passed directly in the location field. If no location is available,
+do not invent or assume one.
 """
 
 
@@ -860,6 +845,29 @@ def _request_value(
     return None
 
 
+def _specific_date_summary(result: Dict[str, Any], target_date: str) -> str:
+    """Build a concise summary for a single requested forecast date."""
+    location = result.get("location") or "the requested location"
+    forecast = result.get("forecast") or []
+    if not forecast:
+        return f"A forecast for {target_date} is not available for {location}."
+
+    day = forecast[0]
+    details = []
+    if day.get("weather"):
+        details.append(str(day["weather"]).lower())
+    if day.get("high_f") is not None:
+        details.append(f"high {day['high_f']:g}°F")
+    if day.get("low_f") is not None:
+        details.append(f"low {day['low_f']:g}°F")
+    if day.get("precipitation_probability") is not None:
+        details.append(f"{day['precipitation_probability']:g}% chance of precipitation")
+
+    if not details:
+        return f"Weather data for {target_date} is incomplete for {location}."
+    return f"Forecast for {location} on {target_date}: " + ", ".join(details) + "."
+
+
 def run_lookup(
     request: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -868,8 +876,10 @@ def run_lookup(
 
     Accepted request fields:
         location: string
+        resolved_location: result from the location capability
         latitude: number
         longitude: number
+        date: specific forecast date (YYYY-MM-DD)
         forecast_days: integer (1-16)
     """
 
@@ -878,6 +888,21 @@ def run_lookup(
             "weather request must be a dictionary"
         )
 
+    resolved_location = request.get("resolved_location")
+    target_date_value = _request_value(request, "date", "forecast_date")
+    target_date = None
+    if target_date_value is not None:
+        target_date = str(target_date_value).strip()
+        try:
+            datetime.strptime(target_date, "%Y-%m-%d")
+        except ValueError:
+            return {
+                "status": "invalid_date",
+                "requested_date": target_date,
+                "message": "Weather date must use YYYY-MM-DD format.",
+                "simple_summary": "I couldn't interpret the requested forecast date.",
+            }
+
     location = _request_value(
         request,
         "location",
@@ -885,22 +910,60 @@ def run_lookup(
         "city",
     )
 
-    latitude = _number(
-        _request_value(
-            request,
-            "latitude",
-            "lat",
+    if isinstance(resolved_location, dict):
+        status = resolved_location.get("status", "resolved")
+        if status != "resolved":
+            return {
+                "status": status,
+                "location_query": resolved_location.get("query"),
+                "message": resolved_location.get("message") or "The location could not be resolved.",
+                "candidates": resolved_location.get("candidates", []),
+                "simple_summary": (
+                    "The location is ambiguous. Please specify the region or country."
+                    if status == "ambiguous"
+                    else "I couldn't find that location. Please check the spelling or add a region."
+                ),
+            }
+        latitude = _number(resolved_location.get("latitude"))
+        longitude = _number(resolved_location.get("longitude"))
+        if latitude is None or longitude is None:
+            return {
+                "status": "invalid_location_result",
+                "message": "The resolved location did not contain valid coordinates.",
+                "simple_summary": "I couldn't resolve the location coordinates.",
+            }
+        location = (
+            resolved_location.get("display_name")
+            or resolved_location.get("city")
+            or resolved_location.get("query")
+            or location
         )
-    )
+        metadata = resolved_location
+    else:
+        location = _request_value(
+            request,
+            "location",
+            "place",
+            "city",
+        )
 
-    longitude = _number(
-        _request_value(
-            request,
-            "longitude",
-            "lon",
-            "lng",
+    if not isinstance(resolved_location, dict):
+        latitude = _number(
+            _request_value(
+                request,
+                "latitude",
+                "lat",
+            )
         )
-    )
+
+        longitude = _number(
+            _request_value(
+                request,
+                "longitude",
+                "lon",
+                "lng",
+            )
+        )
 
     forecast_days_value = _request_value(
         request,
@@ -921,7 +984,8 @@ def run_lookup(
         min(forecast_days, 16),
     )
 
-    metadata: Dict[str, Any] = {}
+    if not isinstance(resolved_location, dict):
+        metadata = {}
 
     if latitude is not None or longitude is not None:
 
@@ -936,11 +1000,23 @@ def run_lookup(
             or f"{latitude:.5f}, {longitude:.5f}"
         )
 
-    elif location:
+    elif location and not isinstance(resolved_location, dict):
 
-        geo = geocode_location(
-            str(location)
-        )
+        try:
+            geo = geocode_location(str(location))
+        except ValueError as exc:
+            message = str(exc)
+            status = "ambiguous" if message.startswith("Ambiguous location") else "not_found"
+            return {
+                "status": status,
+                "location_query": str(location),
+                "message": message,
+                "simple_summary": (
+                    "The location is ambiguous. Please specify the region or country."
+                    if status == "ambiguous"
+                    else f"I couldn't resolve {location!r}. Please check the spelling or add a region."
+                ),
+            }
 
         latitude = float(
             geo["latitude"]
@@ -963,10 +1039,11 @@ def run_lookup(
             "or both latitude and longitude"
         )
 
+    requested_forecast_days = 16 if target_date else forecast_days
     raw = fetch_weather(
         latitude=latitude,
         longitude=longitude,
-        forecast_days=forecast_days,
+        forecast_days=requested_forecast_days,
     )
 
     result = normalize_weather(
@@ -977,11 +1054,30 @@ def run_lookup(
         metadata=metadata,
     )
 
-    result["forecast_days"] = forecast_days
-    result["simple_summary"] = (
-        build_simple_summary(result)
-    )
+    if target_date:
+        matching_days = [
+            day for day in result.get("forecast", [])
+            if day.get("date") == target_date
+        ]
+        result["requested_date"] = target_date
+        result["forecast"] = matching_days
+        result["forecast_days"] = 1
+        if not matching_days:
+            result["status"] = "forecast_unavailable"
+            result["message"] = (
+                f"No forecast is available for {target_date}. "
+                "The requested date may be outside the available forecast range."
+            )
+            result["simple_summary"] = (
+                f"A forecast for {target_date} is not available for {location_label}."
+            )
+            return result
+        result["simple_summary"] = _specific_date_summary(result, target_date)
+    else:
+        result["forecast_days"] = forecast_days
+        result["simple_summary"] = build_simple_summary(result)
 
+    result["status"] = "ok"
     return result
 
 
