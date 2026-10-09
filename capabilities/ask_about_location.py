@@ -33,11 +33,9 @@ PLANNER_INSTRUCTIONS = (
 )
 
 ANSWER_RULES = """
-- Answer the specific location question directly.
-- For simple location questions, normally use one sentence.
-- Include only essential geographic context.
-- Do not add unrelated distances, travel times, tourist attractions,
-  historical background, or comparisons unless requested.
+- Answer simple location questions in one short sentence.
+- Give only the minimum geographic detail needed to identify the location.
+- Do not add supplementary facts, distances, travel times, or explanations unless requested.
 - For ZIP codes, identify the primary associated city and state when available.
 - For current-location queries based on IP geolocation, explicitly describe
   the result as approximate.
