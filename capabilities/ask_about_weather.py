@@ -298,7 +298,10 @@ def _location_label(
 
 def geocode_location(location: str) -> Dict[str, Any]:
     """
-    Resolve a location with Open-Meteo without silently guessing US cities.
+    Resolve a location worldwide using Open-Meteo geocoding.
+
+    A comma-separated qualifier is matched against the returned geographic
+    metadata. No country or city is assumed when the query is ambiguous.
     """
 
     location = str(location).strip()
@@ -306,94 +309,20 @@ def geocode_location(location: str) -> Dict[str, Any]:
     if not location:
         raise ValueError("location cannot be empty")
 
-    state_names = {
-        "AL": "Alabama",
-        "AK": "Alaska",
-        "AZ": "Arizona",
-        "AR": "Arkansas",
-        "CA": "California",
-        "CO": "Colorado",
-        "CT": "Connecticut",
-        "DE": "Delaware",
-        "FL": "Florida",
-        "GA": "Georgia",
-        "HI": "Hawaii",
-        "ID": "Idaho",
-        "IL": "Illinois",
-        "IN": "Indiana",
-        "IA": "Iowa",
-        "KS": "Kansas",
-        "KY": "Kentucky",
-        "LA": "Louisiana",
-        "ME": "Maine",
-        "MD": "Maryland",
-        "MA": "Massachusetts",
-        "MI": "Michigan",
-        "MN": "Minnesota",
-        "MS": "Mississippi",
-        "MO": "Missouri",
-        "MT": "Montana",
-        "NE": "Nebraska",
-        "NV": "Nevada",
-        "NH": "New Hampshire",
-        "NJ": "New Jersey",
-        "NM": "New Mexico",
-        "NY": "New York",
-        "NC": "North Carolina",
-        "ND": "North Dakota",
-        "OH": "Ohio",
-        "OK": "Oklahoma",
-        "OR": "Oregon",
-        "PA": "Pennsylvania",
-        "RI": "Rhode Island",
-        "SC": "South Carolina",
-        "SD": "South Dakota",
-        "TN": "Tennessee",
-        "TX": "Texas",
-        "UT": "Utah",
-        "VT": "Vermont",
-        "VA": "Virginia",
-        "WA": "Washington",
-        "WV": "West Virginia",
-        "WI": "Wisconsin",
-        "WY": "Wyoming",
-    }
+    cleaned = re.sub(r"\\s+", " ", location).strip()
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
 
-    state_lookup = {
-        value.lower(): value
-        for value in state_names.values()
-    }
-
-    state_lookup.update(
-        {
-            key.lower(): value
-            for key, value in state_names.items()
-        }
-    )
-
-    cleaned = re.sub(r"\s+", " ", location).strip()
-
-    explicit_state = None
-    city_part = cleaned
-
-    match = re.match(
-        r"^(.*?)(?:,\s*|\s+)([A-Za-z]{2}|[A-Za-z]+(?:\s+[A-Za-z]+)?)$",
-        cleaned,
-    )
-
-    if match and match.group(1).strip():
-        possible_state = match.group(2).strip().lower()
-
-        if possible_state in state_lookup:
-            city_part = match.group(1).strip(" ,")
-            explicit_state = state_lookup[possible_state]
+    # A qualified query such as "Taipei, Taiwan" or
+    # "Portland, Oregon, USA" searches for the place name first, then
+    # filters candidates using the qualifiers returned by Open-Meteo.
+    place_name = parts[0] if len(parts) > 1 else cleaned
+    qualifiers = parts[1:] if len(parts) > 1 else []
 
     params = {
-        "name": city_part if explicit_state else cleaned,
-        "count": 10 if explicit_state else 5,
+        "name": place_name,
+        "count": 100,
         "language": "en",
         "format": "json",
-        "country_code": "US",
     }
 
     data = _http_json(
@@ -408,57 +337,83 @@ def geocode_location(location: str) -> Dict[str, Any]:
             f"Could not find a location named {location!r}"
         )
 
-    if explicit_state:
-        state_results = [
-            result
-            for result in results
-            if str(
-                result.get("admin1") or ""
-            ).strip().lower()
-            == explicit_state.lower()
-        ]
+    def normalize(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
 
-        if not state_results:
+    if qualifiers:
+        filtered_results = []
+
+        for candidate in results:
+            geographic_values = [
+                candidate.get("name"),
+                candidate.get("admin1"),
+                candidate.get("admin2"),
+                candidate.get("admin3"),
+                candidate.get("country"),
+                candidate.get("country_code"),
+            ]
+            normalized_values = {
+                normalize(value)
+                for value in geographic_values
+                if value
+            }
+
+            # Every supplied qualifier must match a geographic field.
+            if all(
+                normalize(qualifier) in normalized_values
+                for qualifier in qualifiers
+            ):
+                filtered_results.append(candidate)
+
+        if not filtered_results:
+            qualifier_text = ", ".join(qualifiers)
             raise ValueError(
-                f"Could not find {city_part!r} in {explicit_state}."
+                f"Could not find {place_name!r} matching "
+                f"the geographic qualifier(s) {qualifier_text!r}."
             )
 
-        result = state_results[0]
+        results = filtered_results
 
-    else:
-        # Never silently choose between same-named US locations.
-        names = {
-            (
-                str(result.get("name") or "").strip().lower(),
-                str(result.get("admin1") or "").strip().lower(),
-            )
-            for result in results
-        }
+    # Avoid silently choosing between different places with the same name.
+    identities = {
+        (
+            normalize(candidate.get("name")),
+            normalize(candidate.get("admin1")),
+            normalize(candidate.get("admin2")),
+            normalize(candidate.get("country")),
+            normalize(candidate.get("country_code")),
+            candidate.get("latitude"),
+            candidate.get("longitude"),
+        )
+        for candidate in results
+    }
 
-        if len(names) > 1:
-            choices = []
+    if len(identities) > 1:
+        choices = []
 
-            for result in results:
-                name = result.get("name")
-                admin1 = result.get("admin1")
-
-                if name and admin1:
-                    label = f"{name}, {admin1}"
-
-                    if label not in choices:
-                        choices.append(label)
-
-            raise ValueError(
-                f"Ambiguous location {location!r}. "
-                "Please specify the state"
-                + (
-                    f", for example: {choices[0]}."
-                    if choices
-                    else "."
-                )
+        for candidate in results:
+            label_parts = [
+                candidate.get("name"),
+                candidate.get("admin1"),
+                candidate.get("country"),
+            ]
+            label = ", ".join(
+                str(part)
+                for part in label_parts
+                if part
             )
 
-        result = results[0]
+            if label and label not in choices:
+                choices.append(label)
+
+        examples = "; ".join(choices[:5])
+        raise ValueError(
+            f"Ambiguous location {location!r}. "
+            "Please provide a more specific region or country"
+            + (f", for example: {examples}." if examples else ".")
+        )
+
+    result = results[0]
 
     latitude = _number(result.get("latitude"))
     longitude = _number(result.get("longitude"))
