@@ -34,13 +34,18 @@ PLANNER_INSTRUCTIONS = (
 
 ANSWER_RULES = """
 - Answer the user's actual location question directly and concisely.
-- Treat returned coordinates and location fields as lookup results, not as proof of the user's exact physical location.
-- When the location was resolved from a public IP address, describe it as approximate; IP geolocation may identify the network's general area rather than the user's precise location.
-- Do not invent or infer missing address components, coordinates, or location details.
-- Preserve distinctions between a city, town, village, postal code, and broader region when the lookup provides them.
-- If the lookup fails or returns incomplete information, state the limitation instead of guessing.
-- Include coordinates only when relevant to the user's request or needed by another capability.
-- Do not expose raw lookup data or source details unless they help answer the question.
+- For a simple "where is X?" question, normally provide one or two sentences
+  identifying the location and its relevant geographic context.
+- Do not add travel times, distances from unrelated cities, tourist attractions,
+  or comparisons with previous questions unless requested or directly relevant.
+- For distance questions, provide the approximate distance and distinguish
+  straight-line distance from travel distance when useful.
+- Treat IP-based geolocation as approximate; never imply it establishes the
+  user's precise physical location.
+- Do not invent missing address components, coordinates, or location details.
+- If the lookup fails or returns incomplete information, acknowledge the
+  limitation rather than guessing.
+- Include coordinates and technical lookup details only when relevant.
 """
 
 REQUEST_SCHEMA = {
