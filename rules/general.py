@@ -11,4 +11,8 @@ GENERAL_ANSWER_RULES = """
 - Adapt the response length and structure to the complexity of the question.
 - Respect any applicable capability-specific answer rules.
 - Do not sacrifice accuracy or essential context merely to shorten an answer.
+- Avoid Markdown formatting by default.
+- Do not use bold, italics, headings, bullet lists, or numbered lists unless
+  they materially improve readability or the user requests them.
+- Prefer plain text and natural paragraphs for simple factual answers.
 """
