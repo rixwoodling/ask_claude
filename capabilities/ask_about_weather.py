@@ -78,37 +78,58 @@ DESCRIPTION = (
     "compact deterministic summary suitable for simple weather questions."
 )
 
-
 PLANNER_INSTRUCTIONS = """
-Weather requires either a location string, a resolved_location result from the
-location capability, or both latitude and longitude.
+Use this capability when the user asks about current weather or a forecast.
 
-When a location capability is available, use it to resolve explicitly named
-places and ZIP codes before requesting weather. This lets the location
-capability identify ambiguity rather than letting weather guess. For a
-request without a named location, ask the location capability for the
-approximate current location using {"current": true}.
+Weather requires one of:
+- A location string.
+- A resolved location result from the location capability.
+- Both latitude and longitude.
 
-Pass the complete location result into weather using:
+LOCATION RESOLUTION
+
+If the user names a place or provides a postal code, use the location
+capability to resolve it when that capability is available.
+
+Pass its complete result to weather using:
 {"resolved_location": "$location"}
-The weather capability will use the coordinates if the location result is
-resolved. If it is ambiguous or not found, it will return that status and the
-available candidates instead of making a weather request.
 
-If the user asks about a relative date such as "tomorrow" or "two days from
-now" and a date capability is available, call the date capability first and
-pass its resolved YYYY-MM-DD value in weather's date field. Use a reference to
-the actual date field returned by that capability (for example,
-"$date.date" only if its output field is named "date"). Do not make weather
-interpret a relative-date expression when the date capability can resolve it.
+If the user does not specify a location, use the location capability
+to obtain the approximate current location:
+{"current": true}
 
-For a specific forecast date, weather returns only that day's forecast. If no
-specific date is requested, use forecast_days appropriate to the question.
-Do not request more than 16 forecast days. Never invent a location or date.
+Do not invent a location. If the location result is ambiguous or
+unresolved, pass it to weather so the result can be handled appropriately.
 
-If the location capability is unavailable, an explicitly provided location
-may be passed directly in the location field. If no location is available,
-do not invent or assume one.
+If the location capability is unavailable, an explicitly provided
+location may be passed directly in the location field.
+
+DATE RESOLUTION
+
+If the user requests a relative date, such as "tomorrow" or "two days
+from now", use the date capability when available.
+
+Pass the resolved date to weather using the date field. Reference the
+actual field returned by the date capability:
+- For a day or week offset, use "$date.requested_offset.date".
+- For the current date, use "$date.date".
+
+Do not pass a natural-language date expression to weather when the
+date capability can resolve it.
+
+For an explicitly supplied date in YYYY-MM-DD format, pass that date
+directly to weather.
+
+FORECAST RANGE
+
+When a specific date is requested, provide that date in the date field.
+Weather will return only the forecast for that date, if available.
+
+When no specific date is requested, set forecast_days according to
+the requested timeframe. Use a suitable range for multi-day requests
+and never request more than 16 days.
+
+Never invent a location or date.
 """
 
 
