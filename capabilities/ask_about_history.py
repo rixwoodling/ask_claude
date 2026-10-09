@@ -118,42 +118,92 @@ def _search_terms(query: str) -> list[str]:
     return [word for word in words if word not in stopwords and len(word) > 1]
 
 
-def _search_variants(query: str) -> list[str]:
-    """Build general-purpose query variants from wording and question intent."""
-    original = query.strip()
-    variants = [original]
-    terms = _search_terms(query)
-    reduced = " ".join(terms)
-
-    # For questions asking what a group's or period's life was like, search for
-    # the general concept of daily life alongside the subject supplied by the
-    # user. This is a reusable question-pattern rule, not a topic-specific list.
-    life_match = re.search(
-        r"\bwhat\s+(?:was|were|is|are)\s+(.+?)\s+(?:daily\s+)?life\s+like\b",
-        original, re.I,
+def _life_subject(query: str) -> str | None:
+    """Extract the subject of a general question about historical daily life."""
+    text = _clean(query).rstrip("?.! ")
+    patterns = (
+        # What was Roman life like? / What was daily life like in Rome?
+        r"\bwhat\s+(?:was|were|is|are)\s+(.+?)\s+(?:daily\s+)?life\s+like$",
+        r"\bwhat\s+(?:was|were|is|are)\s+(?:the\s+)?(?:daily\s+)?life\s+like\s+(?:in|during|under|among)\s+(.+)$",
+        # How was life back in Roman times? / How was life during the Viking Age?
+        r"\bhow\s+(?:was|were|is|are)\s+life\s+(?:like\s+)?(?:back\s+)?(?:in|during|under|among)\s+(.+)$",
+        # How did people live in ancient Rome?
+        r"\bhow\s+did\s+people\s+live\s+(?:back\s+)?(?:in|during|under|among)\s+(.+)$",
+        # What was daily life in ancient Rome like?
+        r"\bwhat\s+was\s+(?:the\s+)?daily\s+life\s+(?:like\s+)?(?:in|during|under|among)\s+(.+)$",
     )
-    if life_match:
-        subject = _clean(life_match.group(1))
-    else:
-        life_match = re.search(
-            r"\bwhat\s+(?:was|were|is|are)\s+life\s+like\s+for\s+(.+?)[?.!]*$",
-            original, re.I,
-        )
-        subject = _clean(life_match.group(1)) if life_match else ""
+    subject = None
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            subject = _clean(match.group(1))
+            break
+    if not subject:
+        return None
+
     subject = re.sub(r"^(?:the|a|an)\s+", "", subject, flags=re.I)
+    subject = re.sub(r"\s+(?:times|era|period)$", "", subject, flags=re.I)
+    subject = re.sub(r"^(?:back\s+)?in\s+", "", subject, flags=re.I)
+    return subject.strip() or None
+
+
+def _search_variants(query: str, life_subject_titles: list[str] | None = None) -> list[str]:
+    """Build topic-focused queries without a list of named civilizations."""
+    original = query.strip()
+    subject = _life_subject(query)
+    variants = [original]
+
     if subject:
-        # Quote the concept, but leave the subject unquoted so multiword names
-        # can match naturally without requiring an exact title phrase.
-        variants.append(f'"daily life" {subject}')
+        # Canonical article titles are discovered from Wikipedia at runtime.
+        # Use these focused searches instead of spending a request on the
+        # natural-language question, which Wikipedia often interprets poorly.
+        if life_subject_titles:
+            variants = [f'"daily life" "{title}"' for title in life_subject_titles[:3]]
+        else:
+            variants.append(f'"daily life" "{subject}"')
+            variants.append(f'"{subject}" society culture customs')
+    else:
+        terms = _search_terms(query)
+        reduced = " ".join(terms)
+        if reduced and reduced.casefold() != original.casefold():
+            variants.append(reduced)
+        if len(terms) >= 2:
+            variants.append('"' + " ".join(terms[:5]) + '"')
 
-    if reduced and reduced.casefold() != original.casefold():
-        variants.append(reduced)
-
-    # Quote a compact core phrase to reduce loose, independent word matches.
-    if len(terms) >= 2:
-        phrase = '"' + " ".join(terms[:5]) + '"'
-        variants.append(phrase)
+    # Keep the request budget bounded and avoid duplicate searches.
     return list(dict.fromkeys(v for v in variants if v))[:3]
+
+
+def _resolve_life_subject_titles(subject: str, language: str) -> list[str]:
+    """Resolve a life-question subject to likely historical Wikipedia titles."""
+    data = _get_json(f"https://{language}.wikipedia.org/w/api.php", {
+        "action": "query", "list": "search",
+        "srsearch": f"{subject} history", "srnamespace": 0,
+        "srlimit": 8, "srprop": "snippet", "format": "json",
+        "formatversion": 2,
+    })
+    subject_terms = set(_search_terms(subject))
+    historical_terms = {
+        "ancient", "age", "empire", "kingdom", "republic", "civilization",
+        "dynasty", "medieval", "period", "history", "historical",
+    }
+    ranked = []
+    for rank, page in enumerate(data.get("query", {}).get("search", [])):
+        title = _clean(page.get("title"))
+        snippet = re.sub(r"<[^>]*>", " ", str(page.get("snippet") or ""))
+        title_terms = set(_search_terms(title))
+        snippet_terms = set(_search_terms(snippet))
+        overlap = len(subject_terms & title_terms)
+        snippet_overlap = len(subject_terms & snippet_terms)
+        context = len(historical_terms & title_terms)
+        score = overlap * 4 + snippet_overlap + context + 1 / (rank + 1)
+        if title and score > 0:
+            ranked.append((score, title))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    # Deduplicate titles while preserving score order. These are query hints,
+    # not claims that every selected page is itself a daily-life source.
+    return list(dict.fromkeys(title for _, title in ranked))[:3]
 
 
 def _relevance_score(query_terms: list[str], item: dict[str, str]) -> float:
@@ -172,9 +222,17 @@ def _relevance_score(query_terms: list[str], item: dict[str, str]) -> float:
 
 
 def _search(query: str, limit: int, language: str) -> dict[str, Any]:
-    # Search several mechanically derived variants, gather a candidate pool,
-    # then rank locally. This works across topics without topic-specific rules.
-    variants = _search_variants(query)
+    # For daily-life questions, first resolve the subject to Wikipedia's own
+    # article titles, then search those canonical titles. Other queries retain
+    # the ordinary lightweight query-variant path.
+    life_subject = _life_subject(query)
+    life_titles: list[str] = []
+    if life_subject:
+        try:
+            life_titles = _resolve_life_subject_titles(life_subject, language)
+        except (requests.RequestException, ValueError):
+            life_titles = []
+    variants = _search_variants(query, life_titles)
     candidates: dict[str, dict[str, str]] = {}
     errors = []
     per_query_limit = max(5, min(10, limit * 3))
