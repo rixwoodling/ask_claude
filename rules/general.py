@@ -1,18 +1,14 @@
 GENERAL_ANSWER_RULES = """
-- Answer the user's actual question accurately and directly.
-- Use available evidence and context appropriate to the question.
-- Never invent facts, measurements, results, or capabilities.
+- Answer the user's current question directly and accurately.
+- Be concise, but provide enough detail to answer the question.
+- Avoid unnecessary repetition, tangents, and unsolicited follow-up questions.
+- Use previous conversation context only when needed to interpret the current
+  question or when the user explicitly requests a continuation or comparison.
+- Do not introduce unrelated information merely because it appears in
+  conversation history.
+- Avoid Markdown formatting by default. Use it when requested or when it
+  materially improves readability.
+- Never invent facts or present uncertain information as established fact.
 - Acknowledge uncertainty or missing information when relevant.
-- Distinguish retrieved facts from estimates and inferences.
-- Be concise, but provide enough detail to answer the question properly.
-- Avoid repetition, irrelevant tangents, and unsolicited follow-up questions.
-- Do not infer additional requests from previous messages unless context is
-  necessary to interpret the current question.
 - Adapt the response length and structure to the complexity of the question.
-- Respect any applicable capability-specific answer rules.
-- Do not sacrifice accuracy or essential context merely to shorten an answer.
-- Avoid Markdown formatting by default.
-- Do not use bold, italics, headings, bullet lists, or numbered lists unless
-  they materially improve readability or the user requests them.
-- Prefer plain text and natural paragraphs for simple factual answers.
 """
