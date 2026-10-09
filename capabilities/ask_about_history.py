@@ -65,7 +65,7 @@ PLANNER_INSTRUCTIONS = (
     "For on_this_day, pass date as YYYY-MM-DD or MM-DD when specified, and "
     "category='events', 'births', 'deaths', or 'all' as appropriate. Preserve "
     "the year when the user specifies one. For example, 'What happened on "
-    "December 19th, 1978?' requires date='1978-12-19', not '12-19'. "
+    "January 1st, 1970?' requires date='1970-01-01', not '01-01'. "
     "Do not invent facts or dates. Use the returned source URLs when composing "
     "an answer, and distinguish sourced facts from interpretation. "
     "For questions requiring explanation, synthesize the retrieved information "
