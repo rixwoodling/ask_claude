@@ -154,17 +154,14 @@ def _search_variants(query: str, life_subject_titles: list[str] | None = None) -
     variants = [original]
 
     if subject:
-        # A quoted phrase can find articles explicitly titled around daily life,
-        # but it misses useful articles about work, society, or survival. Pair it
-        # with a broader lived-experience query regardless of title resolution.
+        # Keep the user's original wording as a control query. Replacing it
+        # entirely with expansions can lose results that Wikipedia ranks well
+        # for the natural-language question.
         variants = [
+            original,
             f'"daily life" "{subject}"',
-            f'"{subject}" people society culture customs work family',
+            f'{subject} daily life society people work family',
         ]
-        if life_subject_titles:
-            variants.append(f'"daily life" "{life_subject_titles[0]}"')
-        else:
-            variants.append(f'"{subject}" living conditions everyday life')
     else:
         terms = _search_terms(query)
         reduced = " ".join(terms)
@@ -262,6 +259,12 @@ def _life_relevance_score(
         + 1.0 * len(lived_experience_terms & snippet)
         + 0.75 * len(lived_experience_terms & summary)
     )
+
+    # A title that only names the place/period is weak evidence for a question
+    # about lived experience. Push it below articles whose title or text actually
+    # discusses how people lived, without excluding useful broader articles.
+    if not (lived_experience_terms & (title | snippet | summary)):
+        life_score -= 4.0
 
     # Broadly unrelated article types should not win merely because they repeat
     # the subject's name. Use generic title cues rather than topic-specific bans.
