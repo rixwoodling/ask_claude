@@ -154,17 +154,17 @@ def _search_variants(query: str, life_subject_titles: list[str] | None = None) -
     variants = [original]
 
     if subject:
-        # Canonical article titles are discovered from Wikipedia at runtime.
-        # Use these focused searches instead of spending a request on the
-        # natural-language question, which Wikipedia often interprets poorly.
-        if life_subject_titles:
-            variants = [f'"daily life" "{title}"' for title in life_subject_titles[:3]]
-        else:
-            variants.append(f'"daily life" "{subject}"')
+        # Always search the requested topic directly, then use canonical topic
+        # titles discovered at runtime. This avoids letting a weak subject
+        # resolution silently replace the user's actual topic.
+        variants = [f'"daily life" "{subject}"']
+        variants.extend(f'"daily life" "{title}"' for title in (life_subject_titles or [])[:2])
+        if not life_subject_titles:
             variants.append(f'"{subject}" society culture customs')
     else:
         terms = _search_terms(query)
         reduced = " ".join(terms)
+        variants = [original]
         if reduced and reduced.casefold() != original.casefold():
             variants.append(reduced)
         if len(terms) >= 2:
@@ -216,9 +216,58 @@ def _relevance_score(query_terms: list[str], item: dict[str, str]) -> float:
     title_hits = sum(term in title for term in query_terms)
     snippet_hits = sum(term in snippet for term in query_terms)
     summary_hits = sum(term in summary for term in query_terms)
-    # Title matches carry more weight; summary matches help distinguish relevant
-    # articles from pages that only mention the subject in passing.
     return (title_hits * 4.0) + (snippet_hits * 1.5) + (summary_hits * 1.0)
+
+
+def _life_relevance_score(
+    item: dict[str, str], subject: str, subject_titles: list[str] | None = None,
+) -> float:
+    """Rank daily-life sources by subject relevance and evidence about lived experience."""
+    title_text = item.get("title", "").lower()
+    snippet_text = item.get("snippet", "").lower()
+    summary_text = item.get("summary", "").lower()
+    title = set(re.findall(r"[\w'-]+", title_text))
+    snippet = set(re.findall(r"[\w'-]+", snippet_text))
+    summary = set(re.findall(r"[\w'-]+", summary_text))
+    all_text = f"{title_text} {snippet_text} {summary_text}"
+
+    # Add terms from runtime-discovered canonical subject titles. This helps
+    # link demonyms (e.g. "Roman") to place names (e.g. "Rome") without a
+    # hand-maintained civilization dictionary.
+    subject_terms = set(_search_terms(subject))
+    for canonical_title in subject_titles or []:
+        subject_terms.update(_search_terms(canonical_title))
+    subject_score = (
+        4.0 * len(subject_terms & title)
+        + 1.5 * len(subject_terms & snippet)
+        + 1.0 * len(subject_terms & summary)
+    )
+
+    # These are general aspects of daily life, not named historical topics.
+    lived_experience_terms = {
+        "daily", "society", "social", "culture", "customs", "family",
+        "families", "household", "housing", "home", "homes", "food",
+        "diet", "work", "occupation", "occupations", "childhood",
+        "women", "men", "children", "education", "religion", "religious",
+        "entertainment", "games", "clothing", "marriage", "married",
+        "trade", "agriculture", "farmers", "labor", "labour", "生活",
+        "living", "routine", "routines", "economy", "economics", "urban",
+    }
+    life_score = (
+        3.0 * len(lived_experience_terms & title)
+        + 1.0 * len(lived_experience_terms & snippet)
+        + 0.75 * len(lived_experience_terms & summary)
+    )
+
+    # Broadly unrelated article types should not win merely because they repeat
+    # the subject's name. Use generic title cues rather than topic-specific bans.
+    noisy_title_phrases = (
+        "life expectancy", "video game", "television series", "horror film",
+        "romantic comedy", "disambiguation", "surname", "given name",
+        "discography", "album", "soundtrack", "fictional character",
+    )
+    penalty = 5.0 if any(phrase in title_text for phrase in noisy_title_phrases) else 0.0
+    return subject_score + life_score - penalty
 
 
 def _search(query: str, limit: int, language: str) -> dict[str, Any]:
@@ -281,14 +330,25 @@ def _search(query: str, limit: int, language: str) -> dict[str, Any]:
         )
 
     query_terms = _search_terms(query)
-    ranked = sorted(
-        candidates.values(),
-        key=lambda item: (
-            _relevance_score(query_terms, item) + item.get("_search_score", 0.0),
-            bool(item.get("summary")),
-        ),
-        reverse=True,
-    )
+    if life_subject:
+        ranked = sorted(
+            candidates.values(),
+            key=lambda item: (
+                _life_relevance_score(item, life_subject, life_titles)
+                + item.get("_search_score", 0.0),
+                bool(item.get("summary")),
+            ),
+            reverse=True,
+        )
+    else:
+        ranked = sorted(
+            candidates.values(),
+            key=lambda item: (
+                _relevance_score(query_terms, item) + item.get("_search_score", 0.0),
+                bool(item.get("summary")),
+            ),
+            reverse=True,
+        )
     results = ranked[:limit]
     for item in results:
         item.pop("_search_score", None)
