@@ -374,7 +374,21 @@ def geocode_location(location: str) -> Dict[str, Any]:
 
         results = filtered_results
 
-    # Avoid silently choosing between different places with the same name.
+    # Prefer exact place-name matches. Open-Meteo may also return points
+    # of interest containing the search term (airports, hospitals, etc.).
+    # Those should not make an otherwise unambiguous city name ambiguous.
+    normalized_query = normalize(place_name)
+    exact_matches = [
+        candidate
+        for candidate in results
+        if normalize(candidate.get("name")) == normalized_query
+    ]
+
+    if exact_matches:
+        results = exact_matches
+
+    # Detect ambiguity between distinct geographic places, not between
+    # duplicate records or nearby points with different coordinates.
     identities = {
         (
             normalize(candidate.get("name")),
@@ -382,8 +396,6 @@ def geocode_location(location: str) -> Dict[str, Any]:
             normalize(candidate.get("admin2")),
             normalize(candidate.get("country")),
             normalize(candidate.get("country_code")),
-            candidate.get("latitude"),
-            candidate.get("longitude"),
         )
         for candidate in results
     }
@@ -413,7 +425,12 @@ def geocode_location(location: str) -> Dict[str, Any]:
             + (f", for example: {examples}." if examples else ".")
         )
 
-    result = results[0]
+    # If Open-Meteo returned duplicate records for the same geographic
+    # identity, prefer the most populated result when population is present.
+    result = max(
+        results,
+        key=lambda candidate: candidate.get("population") or 0,
+    )
 
     latitude = _number(result.get("latitude"))
     longitude = _number(result.get("longitude"))
