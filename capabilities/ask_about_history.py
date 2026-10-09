@@ -119,17 +119,40 @@ def _search_terms(query: str) -> list[str]:
 
 
 def _search_variants(query: str) -> list[str]:
-    """Build a small set of query variants mechanically from the user's query."""
-    variants = [query.strip()]
+    """Build general-purpose query variants from wording and question intent."""
+    original = query.strip()
+    variants = [original]
     terms = _search_terms(query)
     reduced = " ".join(terms)
-    if reduced and reduced.casefold() != query.strip().casefold():
+
+    # For questions asking what a group's or period's life was like, search for
+    # the general concept of daily life alongside the subject supplied by the
+    # user. This is a reusable question-pattern rule, not a topic-specific list.
+    life_match = re.search(
+        r"\bwhat\s+(?:was|were|is|are)\s+(.+?)\s+(?:daily\s+)?life\s+like\b",
+        original, re.I,
+    )
+    if life_match:
+        subject = _clean(life_match.group(1))
+    else:
+        life_match = re.search(
+            r"\bwhat\s+(?:was|were|is|are)\s+life\s+like\s+for\s+(.+?)[?.!]*$",
+            original, re.I,
+        )
+        subject = _clean(life_match.group(1)) if life_match else ""
+    subject = re.sub(r"^(?:the|a|an)\s+", "", subject, flags=re.I)
+    if subject:
+        # Quote the concept, but leave the subject unquoted so multiword names
+        # can match naturally without requiring an exact title phrase.
+        variants.append(f'"daily life" {subject}')
+
+    if reduced and reduced.casefold() != original.casefold():
         variants.append(reduced)
-    # A quoted core phrase can help when the query contains several content words.
+
+    # Quote a compact core phrase to reduce loose, independent word matches.
     if len(terms) >= 2:
         phrase = '"' + " ".join(terms[:5]) + '"'
-        if phrase not in variants:
-            variants.append(phrase)
+        variants.append(phrase)
     return list(dict.fromkeys(v for v in variants if v))[:3]
 
 
