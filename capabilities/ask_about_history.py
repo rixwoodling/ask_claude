@@ -63,7 +63,9 @@ PLANNER_INSTRUCTIONS = (
     "Use mode='on_this_day' for 'on this day in history', historical events "
     "on a specific month/day, or notable births/deaths associated with a date. "
     "For on_this_day, pass date as YYYY-MM-DD or MM-DD when specified, and "
-    "category='events', 'births', 'deaths', or 'all' as appropriate. "
+    "category='events', 'births', 'deaths', or 'all' as appropriate. Preserve "
+    "the year when the user specifies one. For example, 'What happened on "
+    "December 19th, 1978?' requires date='1978-12-19', not '12-19'. "
     "Do not invent facts or dates. Use the returned source URLs when composing "
     "an answer, and distinguish sourced facts from interpretation. "
     "For questions requiring explanation, synthesize the retrieved information "
@@ -274,6 +276,63 @@ def _parse_month_day(value: Any) -> tuple[int, int, Optional[int]]:
     raise ValueError("date must be YYYY-MM-DD or MM-DD.")
 
 
+def _infer_date_from_query(query: str) -> Optional[str]:
+    """Extract a clearly stated date from a natural-language history question."""
+    text = _clean_text(query)
+    if not text:
+        return None
+
+    # ISO date, e.g. 1978-12-19.
+    match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
+    if match:
+        candidate = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+        try:
+            date.fromisoformat(candidate)
+            return candidate
+        except ValueError:
+            return None
+
+    months = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10,
+        "nov": 11, "dec": 12,
+    }
+    month_pattern = "|".join(sorted(months, key=len, reverse=True))
+    match = re.search(
+        rf"\b({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        # Also accept 19 December 1978.
+        match = re.search(
+            rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})(?:,?\s+(\d{{4}}))?\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        day = int(match.group(1))
+        month = months[match.group(2).lower()]
+        year = int(match.group(3)) if match.group(3) else None
+    else:
+        month = months[match.group(1).lower()]
+        day = int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else None
+
+    try:
+        if year is not None:
+            date(year, month, day)
+            return f"{year:04d}-{month:02d}-{day:02d}"
+        date(2000, month, day)
+        return f"{month:02d}-{day:02d}"
+    except ValueError:
+        return None
+
+
 def _on_this_day(
     date_value: Any,
     category: str,
@@ -340,6 +399,26 @@ def _on_this_day(
             f"Wikipedia ({language})",
         )
 
+    # Wikimedia's curated On This Day feed does not include every historical
+    # date. If an exact year was requested but no item exists in the feed, try
+    # a targeted Wikipedia search rather than returning unrelated years.
+    if year is not None and not results:
+        month_name = date(year, month, day).strftime("%B")
+        date_query = f"{month_name} {day}, {year} historical events"
+        fallback = _search_pages(date_query, min(limit, 3), language)
+        return {
+            "source": f"Wikipedia ({language})",
+            "mode": "search",
+            "requested_mode": "on_this_day",
+            "date": f"{year:04d}-{month:02d}-{day:02d}",
+            "category": category,
+            "fallback_reason": "The On This Day feed had no entry for that exact year; searched Wikipedia instead.",
+            "query": date_query,
+            "result_count": fallback.get("result_count", 0),
+            "results": fallback.get("results", []),
+            **({"error": fallback["error"]} if fallback.get("error") else {}),
+        }
+
     # Keep results in API order and cap the returned payload.
     results = results[:limit]
     return {
@@ -393,6 +472,20 @@ def run_lookup(request: Dict[str, Any]) -> Dict[str, Any]:
     language = str(request.get("language") or "en").strip().lower()
     limit = _limit(request.get("limit"), default=5)
     query = _clean_text(request.get("query"))
+
+    # Defensive routing: date questions sometimes arrive with mode="search"
+    # or a month/day date that has lost its year. Recover a stated date from
+    # the original question before calling the On This Day feed.
+    inferred_date = _infer_date_from_query(query)
+    if inferred_date and re.search(r"\b(what happened|events? on|on this day|history of what happened)\b", query, re.IGNORECASE):
+        if mode == "search":
+            mode = "on_this_day"
+        if mode == "on_this_day" and len(str(request.get("date") or "").split("-")) != 3 and len(inferred_date.split("-")) == 3:
+            request = dict(request)
+            request["date"] = inferred_date
+        elif mode == "on_this_day" and not request.get("date"):
+            request = dict(request)
+            request["date"] = inferred_date
 
     if not re.fullmatch(r"[a-zA-Z0-9-]{1,20}", language):
         return {"error": "Invalid Wikipedia language code."}
