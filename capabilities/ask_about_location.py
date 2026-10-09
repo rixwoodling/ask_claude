@@ -5,6 +5,7 @@ Supports:
 - Named locations via OpenStreetMap Nominatim.
 - US ZIP codes via Zippopotam.us.
 - Current/non-specific location via IP geolocation.
+- Great-circle distance calculations between two locations.
 
 The module exposes:
     CAPABILITY
@@ -13,6 +14,7 @@ The module exposes:
 """
 
 import json
+import math
 import re
 import sys
 import urllib.parse
@@ -22,44 +24,40 @@ import urllib.request
 CAPABILITY = "location"
 
 PLANNER_INSTRUCTIONS = (
-    "For location-dependent questions, use the location capability to "
-    "resolve the requested place before calling a capability that needs "
-    "coordinates. If the user refers to their current or local location "
-    "without naming a specific place, request the location capability "
-    "with current=true. For a named place or ZIP code, put it in the "
-    "query field. When another capability needs coordinates from this "
-    "lookup, use $location.latitude and $location.longitude. Do not "
-    "invent coordinates or guess a city."
+    "Use this capability for place lookups, current approximate location, "
+    "ZIP-code location, and geographic distance questions. For a named place "
+    "or ZIP code, put it in query. For current location, set current=true. "
+    "For distance questions, provide origin and destination as separate "
+    "fields; do not estimate distance from memory. The capability calculates "
+    "great-circle distance from resolved coordinates. Do not invent places "
+    "or coordinates."
 )
 
 ANSWER_RULES = """
 - Answer simple location questions in one short sentence.
-- Give only the minimum geographic detail needed to identify the location.
-- Do not add supplementary facts, distances, travel times, or explanations unless requested.
-- For ZIP codes, identify the primary associated city and state when available.
-- For current-location queries based on IP geolocation, explicitly describe
-  the result as approximate.
+- Give only the minimum geographic detail needed to answer the question.
+- For ZIP codes, identify the associated city and state when available.
+- For current-location queries based on IP geolocation, describe the result as approximate.
 - Never imply that IP geolocation identifies the user's exact physical address.
 - Do not invent missing coordinates or address details.
-- If the lookup fails or returns incomplete information, state the limitation.
-- Include coordinates only when relevant to the request.
-- Avoid Markdown formatting by default.
-- Do not use bold, italics, headings, bullet lists, or numbered lists for simple
-  location answers.
-- Use plain text unless formatting materially improves readability or the user
-  requests it.
-- Never repeat information or explain a limitation more than once in the same answer.
-- For simple "where is X?" questions, give only the location and one essential geographic detail.
+- If a lookup fails or returns incomplete information, state the limitation.
+- For distance questions, report the calculated great-circle distance in miles and kilometers.
+- Clearly distinguish straight-line distance from road distance or flight distance.
+- Do not add flight times, routes, or travel advice unless requested.
+- Avoid Markdown formatting for simple answers. Use plain text unless formatting materially improves readability.
 """
 
 REQUEST_SCHEMA = {
     "query": "location name, address, city, state, country, or US ZIP code",
     "current": "optional boolean; use true for approximate current location",
+    "origin": "optional origin location for a geographic distance calculation",
+    "destination": "optional destination location for a geographic distance calculation",
 }
 
 DESCRIPTION = (
-    "Resolve a named location, US ZIP code, or the user's current approximate "
-    "location into latitude/longitude and address information."
+    "Resolve named locations, US ZIP codes, or the user's approximate current "
+    "location. Calculate great-circle distances between two locations when "
+    "origin and destination are supplied."
 )
 
 USER_AGENT = "local-personal-assistant/1.0"
@@ -230,6 +228,59 @@ def _current_location():
     }
 
 
+def _haversine_distance(lat1, lon1, lat2, lon2):
+    """Return great-circle distance in kilometers between two coordinates."""
+    earth_radius_km = 6371.0088
+
+    lat1, lon1, lat2, lon2 = map(
+        math.radians, (lat1, lon1, lat2, lon2)
+    )
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+    a = max(0.0, min(1.0, a))
+    return 2 * earth_radius_km * math.asin(math.sqrt(a))
+
+
+def _resolve_location(query):
+    """Resolve one named place or ZIP code to location fields."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("Both origin and destination must be provided.")
+    query = query.strip()
+    if _is_us_zip(query):
+        return _lookup_zip(query)
+    return _geocode(query)
+
+
+def _distance_lookup(origin, destination):
+    """Resolve two places and calculate their great-circle distance."""
+    origin_data = _resolve_location(origin)
+    destination_data = _resolve_location(destination)
+
+    distance_km = _haversine_distance(
+        origin_data["latitude"],
+        origin_data["longitude"],
+        destination_data["latitude"],
+        destination_data["longitude"],
+    )
+    return {
+        "type": "great_circle_distance",
+        "origin": origin_data.get("display_name") or origin_data["query"],
+        "destination": destination_data.get("display_name") or destination_data["query"],
+        "distance_km": round(distance_km, 1),
+        "distance_miles": round(distance_km * 0.621371, 1),
+        "method": "Haversine great-circle calculation using resolved coordinates",
+        "source": {
+            "origin": origin_data.get("source"),
+            "destination": destination_data.get("source"),
+        },
+    }
+
+
 def run_lookup(request):
     """Run a location lookup.
 
@@ -245,6 +296,13 @@ def run_lookup(request):
         raise ValueError("Location request must be a dictionary.")
 
     query = request.get("query")
+
+    origin = request.get("origin")
+    destination = request.get("destination")
+    if origin is not None or destination is not None:
+        if not origin or not destination:
+            raise ValueError("Distance lookup requires both origin and destination.")
+        return _distance_lookup(origin, destination)
 
     if request.get("current") is True or _is_current_location_query(query):
         return _current_location()
