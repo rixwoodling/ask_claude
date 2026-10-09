@@ -32,6 +32,17 @@ PLANNER_INSTRUCTIONS = (
     "invent coordinates or guess a city."
 )
 
+ANSWER_RULES = """
+- Answer the user's actual location question directly and concisely.
+- Treat returned coordinates and location fields as lookup results, not as proof of the user's exact physical location.
+- When the location was resolved from a public IP address, describe it as approximate; IP geolocation may identify the network's general area rather than the user's precise location.
+- Do not invent or infer missing address components, coordinates, or location details.
+- Preserve distinctions between a city, town, village, postal code, and broader region when the lookup provides them.
+- If the lookup fails or returns incomplete information, state the limitation instead of guessing.
+- Include coordinates only when relevant to the user's request or needed by another capability.
+- Do not expose raw lookup data or source details unless they help answer the question.
+"""
+
 REQUEST_SCHEMA = {
     "query": "location name, address, city, state, country, or US ZIP code",
     "current": "optional boolean; use true for approximate current location",
