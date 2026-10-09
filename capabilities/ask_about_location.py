@@ -45,6 +45,11 @@ ANSWER_RULES = """
 - Do not invent missing coordinates or address details.
 - If the lookup fails or returns incomplete information, state the limitation.
 - Include coordinates only when relevant to the request.
+- Avoid Markdown formatting by default.
+- Do not use bold, italics, headings, bullet lists, or numbered lists for simple
+  location answers.
+- Use plain text unless formatting materially improves readability or the user
+  requests it.
 """
 
 REQUEST_SCHEMA = {
