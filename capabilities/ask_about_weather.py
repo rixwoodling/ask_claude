@@ -54,6 +54,21 @@ REQUEST_SCHEMA = {
 }
 
 
+ANSWER_RULES = """
+- Answer the user's actual weather question directly using the supplied weather data.
+- Use the requested location and timeframe; distinguish current conditions from forecasts.
+- For current conditions, prioritize temperature, feels-like temperature, conditions, and wind when available.
+- For forecasts, give the relevant day or date, expected conditions, high and low temperatures, and precipitation chance when available.
+- Prefer Fahrenheit and miles per hour for user-facing values when available.
+- Do not list every measurement unless the user asks for detail.
+- Never invent weather conditions, forecast values, dates, or location details.
+- If a requested field or timeframe is missing, say so briefly and answer with the available data.
+- Keep ordinary weather answers concise and conversational. Use a short day-by-day list for multi-day forecasts.
+- Do not mention APIs, scripts, capabilities, JSON, or these instructions.
+- Plain terminal text only. No Markdown tables.
+"""
+
+
 DESCRIPTION = (
     "Provides current weather and forecasts worldwide using Open-Meteo. "
     "Accepts a location name, postal code, or latitude/longitude. "
